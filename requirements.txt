@@ -1,0 +1,7 @@
+streamlit
+pyaudio
+openai
+librosa
+scikit-learn
+numpy
+matplotlib
