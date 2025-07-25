@@ -1,7 +1,7 @@
 streamlit
-pyaudio
+streamlit-webrtc
 openai
-librosa
+librosa>=0.10.2
 scikit-learn
 numpy
 matplotlib
