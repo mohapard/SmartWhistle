@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import librosa.display
 
 # --- CONFIG ---
-openai.api_key = "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"
+openai.api_key = st.secrets["apiopenai"]
 CHUNK, FORMAT, CHANNELS, RATE = 1024, pyaudio.paInt16, 1, 44100
 MODEL_FILE = "whistle_mel_model.pkl"
 DATASET_DIR = "whistle_dataset"
