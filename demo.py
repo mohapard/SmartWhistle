@@ -1,11 +1,24 @@
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-import av, numpy as np
+import av, wave, os, pickle, time, shutil
+import numpy as np
+import openai, librosa
+from sklearn.linear_model import LogisticRegression
+from datetime import datetime
 import matplotlib.pyplot as plt
-import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
 
-# --- TURN/STUN CONFIG ---
+# --- CONFIG ---
+openai.api_key = st.secrets["openai_key"]
+MODEL_FILE = "whistle_mel_model.pkl"
+DATASET_DIR = "whistle_dataset"
+WHISTLE_DURATION = 3
+VOICE_MAX = 10
+SILENCE_STOP = 3
+SILENCE_THRESHOLD = 500
+RATE = 44100
+os.makedirs(DATASET_DIR, exist_ok=True)
+
 RTC_CONFIGURATION = RTCConfiguration({
     "iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
@@ -17,7 +30,58 @@ RTC_CONFIGURATION = RTCConfiguration({
     ]
 })
 
-# --- AUDIO PROCESSOR ---
+# --- SESSION STATE ---
+if "events" not in st.session_state: st.session_state.events = []
+if "recording_state" not in st.session_state: st.session_state.recording_state = "idle"
+if "status" not in st.session_state: st.session_state.status = "Idle"
+if "whistle_start" not in st.session_state: st.session_state.whistle_start = None
+if "note_start" not in st.session_state: st.session_state.note_start = None
+
+# --- AUDIO HELPERS ---
+def save_audio(frames, filename="sample.wav", rate=RATE):
+    with wave.open(filename, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(b''.join(frames))
+
+def extract_mel(filename):
+    y, sr = librosa.load(filename, sr=22050)
+    y = librosa.util.fix_length(y, size=sr * WHISTLE_DURATION)
+    mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=40)
+    return librosa.power_to_db(mel, ref=np.max).flatten()
+
+# --- MODEL ---
+def train_classifier(single_whistles, double_whistles):
+    X, y = [], []
+    for f in single_whistles:
+        X.append(extract_mel(f)); y.append(0)
+    for f in double_whistles:
+        X.append(extract_mel(f)); y.append(1)
+    model = LogisticRegression(max_iter=500)
+    model.fit(X, y)
+    with open(MODEL_FILE, "wb") as f:
+        pickle.dump(model, f)
+    return model
+
+def load_model():
+    if os.path.exists(MODEL_FILE):
+        with open(MODEL_FILE, "rb") as f: return pickle.load(f)
+    return None
+
+def predict_whistle(filename):
+    model = load_model()
+    if model is None: return "Unknown Whistle"
+    features = extract_mel(filename).reshape(1, -1)
+    return "Single" if model.predict(features)[0] == 0 else "Double"
+
+# --- Transcription ---
+def transcribe_audio(filename):
+    with open(filename, "rb") as f:
+        transcript = openai.audio.transcriptions.create(model="gpt-4o-transcribe", file=f)
+    return transcript.text
+
+# --- Audio Processor ---
 class AudioProcessor:
     def __init__(self):
         self.frames = []
@@ -31,48 +95,26 @@ class AudioProcessor:
         return frame
 
 # --- UI ---
-st.title("Mic Debug with Auto-Refresh")
+st.title("Smart Whistle Logger (Debug Mode)")
 
-# Auto-refresh every 1s
+# Auto-refresh every second
 st_autorefresh(interval=1000, key="refresh")
 
-# Show available devices
-st.markdown("#### Available Audio Devices in Your Browser")
-components.html("""
-<script>
-navigator.mediaDevices.enumerateDevices().then(devices => {
-  const audioDevices = devices.filter(d => d.kind === 'audioinput');
-  const pre = document.createElement('pre');
-  pre.textContent = JSON.stringify(audioDevices, null, 2);
-  document.body.appendChild(pre);
-});
-</script>
-""", height=300)
-
-# Mic selection
-device_id = st.text_input("Enter deviceId (see above). Leave empty for default:")
-media_constraints = {"audio": True, "video": True}
-if device_id.strip():
-    media_constraints = {"audio": {"deviceId": {"exact": device_id}}, "video": True}
+status_box = st.empty()
+status_box.info(st.session_state.status)
 
 # WebRTC
 webrtc_ctx = webrtc_streamer(
-    key="mic-debug",
+    key="recorder",
     mode=WebRtcMode.SENDRECV,
     rtc_configuration=RTC_CONFIGURATION,
     audio_receiver_size=256,
-    media_stream_constraints=media_constraints,
+    media_stream_constraints={"audio": True, "video": False},
     async_processing=True,
     audio_processor_factory=AudioProcessor,
 )
 
-# Status
-if webrtc_ctx.state.playing:
-    st.success("Connected & streaming.")
-else:
-    st.warning("Waiting for connection...")
-
-# Audio frames
+# DEBUG: Frame count
 if webrtc_ctx.audio_processor:
     st.write(f"**Audio frames received:** {webrtc_ctx.audio_processor.count}")
     fig, ax = plt.subplots()
@@ -80,3 +122,81 @@ if webrtc_ctx.audio_processor:
     ax.set_ylim([-32768, 32768])
     ax.set_title("Live Audio Waveform")
     st.pyplot(fig)
+
+# --- START RECORDING ---
+if webrtc_ctx.audio_receiver and st.button("Log Event"):
+    processor = webrtc_ctx.audio_processor
+    if processor:
+        processor.frames.clear()
+        st.session_state.recording_state = "whistle"
+        st.session_state.whistle_start = time.time()
+        st.session_state.status = "Recording whistle..."
+        print("[DEBUG] Started whistle recording")
+
+# --- STATE MACHINE ---
+processor = webrtc_ctx.audio_processor
+if processor:
+    now = time.time()
+
+    # Whistle phase
+    if st.session_state.recording_state == "whistle":
+        elapsed = now - st.session_state.whistle_start
+        print(f"[DEBUG] Whistle recording... {elapsed:.2f}s")
+        if elapsed >= WHISTLE_DURATION:
+            st.session_state.whistle_frames = processor.frames.copy()
+            processor.frames.clear()
+            st.session_state.recording_state = "note"
+            st.session_state.note_start = now
+            st.session_state.status = "Recording voice note..."
+            print("[DEBUG] Whistle phase complete. Switched to note recording.")
+
+    # Note phase
+    elif st.session_state.recording_state == "note":
+        elapsed = now - st.session_state.note_start
+        print(f"[DEBUG] Note recording... {elapsed:.2f}s")
+        if elapsed >= VOICE_MAX:
+            st.session_state.note_frames = processor.frames.copy()
+            st.session_state.recording_state = "done"
+            st.session_state.status = "Processing..."
+            print("[DEBUG] Max note duration reached. Finishing recording.")
+        # Silence detection
+        if processor.frames:
+            audio_data = np.frombuffer(processor.frames[-1], dtype=np.int16)
+            if np.max(np.abs(audio_data)) < SILENCE_THRESHOLD:
+                st.session_state.silent_chunks = st.session_state.get("silent_chunks", 0) + 1
+            else:
+                st.session_state.silent_chunks = 0
+            if st.session_state.silent_chunks > int(RATE / 1024 * SILENCE_STOP):
+                st.session_state.note_frames = processor.frames.copy()
+                st.session_state.recording_state = "done"
+                st.session_state.status = "Processing..."
+                print("[DEBUG] Silence detected. Finishing recording.")
+
+# --- PROCESS RESULTS ---
+if st.session_state.recording_state == "done":
+    whistle_file, voice_file = "whistle.wav", "voice_note.wav"
+    save_audio(st.session_state.whistle_frames, whistle_file)
+    save_audio(st.session_state.note_frames, voice_file)
+    whistle_type = predict_whistle(whistle_file)
+    transcription = transcribe_audio(voice_file)
+    print(f"[DEBUG] Whistle classified: {whistle_type}")
+    print(f"[DEBUG] Transcription: {transcription}")
+
+    # Log event
+    event = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "whistle": whistle_type,
+        "note": transcription
+    }
+    st.session_state.events.append(event)
+
+    st.success(f"Whistle: {whistle_type}")
+    st.write(f"**Transcript:** {transcription}")
+    st.session_state.recording_state = "idle"
+    st.session_state.status = "Idle"
+    print("[DEBUG] Event logged and state reset to idle.")
+
+# --- Event Log ---
+st.write("### Event Log")
+for e in st.session_state.events:
+    st.write(f"- **{e['time']}**: Whistle: {e['whistle']} — Note: {e['note']}")
