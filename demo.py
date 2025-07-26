@@ -1,45 +1,47 @@
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-import av, time, numpy as np, soundfile as sf, librosa, matplotlib.pyplot as plt
+import av, wave, os, time, numpy as np, matplotlib.pyplot as plt
 
-RTC_CONFIGURATION = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+# --- CONFIG ---
+RATE = 44100
 DURATION = 3
-TARGET_RATE = 16000
+os.makedirs("data", exist_ok=True)
+RTC_CONFIGURATION = RTCConfiguration({
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {
+            "urls": ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"],
+            "username": "openrelayproject",
+            "credential": "openrelayproject"
+        }
+    ]
+})
 
-def save_audio(frames, filename, input_rate=48000, target_rate=TARGET_RATE):
-    audio_bytes = b''.join(frames)
-    if not audio_bytes:
-        print("[DEBUG] No audio captured.")
-        return None, None
-    # FIX: Use proper PCM16 data directly
-    pcm = np.frombuffer(audio_bytes, dtype=np.int16)
-    # If stereo → mono
-    if pcm.ndim > 1:
-        pcm = np.mean(pcm, axis=1)
-    # Normalize to float32 for resampling
-    pcm = pcm.astype(np.float32) / 32768.0
-    # Resample to target rate
-    pcm_resampled = librosa.resample(pcm, orig_sr=input_rate, target_sr=target_rate)
-    # Back to int16 for saving
-    pcm_int16 = np.int16(np.clip(pcm_resampled, -1.0, 1.0) * 32767)
-    sf.write(filename, pcm_int16, target_rate, subtype="PCM_16")
-    return filename, pcm_resampled
-
+# --- AUDIO PROCESSOR (same as your code) ---
 class AudioProcessor:
     def __init__(self):
         self.frames = []
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        # FIX: Force signed 16‑bit interleaved PCM
-        arr = frame.to_ndarray(format="s16")
-        self.frames.append(arr.tobytes())
+        self.frames.append(frame.to_ndarray().astype(np.int16).tobytes())
         return frame
 
-st.title("Static Audio Fix Test")
-st.write("Record 3s → Save → Playback → Waveform")
+# --- HELPER: Save WAV ---
+def save_audio(frames, filename, rate=RATE):
+    with wave.open(filename, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(b''.join(frames))
+    return filename
+
+# --- UI ---
+st.title("Audio Frame Capture Debugger")
+progress = st.progress(0)
+status = st.empty()
 
 webrtc_ctx = webrtc_streamer(
-    key="fix_test",
-    mode=WebRtcMode.SENDRECV,
+    key="recorder",
+    mode=WebRtcMode.SENDONLY,
     rtc_configuration=RTC_CONFIGURATION,
     media_stream_constraints={"audio": True, "video": False},
     async_processing=True,
@@ -47,29 +49,36 @@ webrtc_ctx = webrtc_streamer(
     sendback_audio=False
 )
 
-if webrtc_ctx.audio_processor and st.button("Record & Play"):
-    st.write("Recording...")
+if webrtc_ctx.audio_processor and st.button("Record Test Clip"):
     processor = webrtc_ctx.audio_processor
     processor.frames.clear()
     frames = []
     start = time.time()
+    st.info("Recording... Speak or whistle!")
     while time.time() - start < DURATION:
         if processor.frames:
             frames.extend(processor.frames)
             processor.frames.clear()
+        if int(time.time() - start) % 1 == 0:
+            print(f"[DEBUG] Frames so far: {len(frames)}")
+        progress.progress(int(((time.time() - start) / DURATION) * 100))
         time.sleep(0.05)
 
-    filename = "test_fixed.wav"
-    filename, pcm_resampled = save_audio(frames, filename)
-    if filename:
-        st.success("Saved and processed")
-        st.audio(filename, format="audio/wav")
+    # Save file
+    filename = "data/test_capture.wav"
+    save_audio(frames, filename)
+    st.success(f"Recording saved: {filename}")
+    st.audio(filename, format="audio/wav")
 
-        # Waveform
-        fig, ax = plt.subplots()
-        ax.plot(pcm_resampled)
-        ax.set_title("Waveform")
-        st.pyplot(fig)
-    else:
-        st.error("No audio captured.")
+    # Show stats
+    file_size = os.path.getsize(filename)
+    st.write(f"**Frames captured:** {len(frames)}")
+    st.write(f"**File size:** {file_size} bytes")
 
+    # Optional waveform visualization
+    import soundfile as sf
+    audio_data, sr = sf.read(filename)
+    fig, ax = plt.subplots()
+    ax.plot(audio_data)
+    ax.set_title("Captured Audio Waveform")
+    st.pyplot(fig)
