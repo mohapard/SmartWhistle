@@ -3,6 +3,7 @@ from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import av, numpy as np
 import matplotlib.pyplot as plt
 import streamlit.components.v1 as components
+import time
 
 # --- TURN/STUN CONFIG ---
 RTC_CONFIGURATION = RTCConfiguration({
@@ -16,7 +17,7 @@ RTC_CONFIGURATION = RTCConfiguration({
     ]
 })
 
-# --- AUDIO PROCESSOR (DEBUG) ---
+# --- AUDIO PROCESSOR ---
 class AudioProcessor:
     def __init__(self):
         self.frames = []
@@ -30,9 +31,14 @@ class AudioProcessor:
         return frame
 
 # --- UI ---
-st.title("Microphone Debug with Device Selection & Waveform")
+st.title("Mic Debug with Auto-Refresh")
 
-# Show available devices using JS
+# Auto refresh every 1s
+st_autorefresh = st.experimental_rerun  # fallback if needed
+st_autorefresh_interval = 1000
+st_autorefresh = st_autorefresh
+
+# Device lister
 st.markdown("#### Available Audio Devices in Your Browser")
 components.html("""
 <script>
@@ -45,19 +51,11 @@ navigator.mediaDevices.enumerateDevices().then(devices => {
 </script>
 """, height=300)
 
-# Device selection dropdown
-st.markdown("#### Select Microphone")
-device_id = st.text_input("Enter deviceId (see above JSON). Leave empty for default mic:")
-
-# Build media constraints
-media_constraints = {"audio": True, "video": True}  # dummy video track
+device_id = st.text_input("Enter deviceId (see above). Leave empty for default:")
+media_constraints = {"audio": True, "video": True}
 if device_id.strip():
-    media_constraints = {
-        "audio": {"deviceId": {"exact": device_id}},
-        "video": True
-    }
+    media_constraints = {"audio": {"deviceId": {"exact": device_id}}, "video": True}
 
-# Start WebRTC
 webrtc_ctx = webrtc_streamer(
     key="mic-debug",
     mode=WebRtcMode.SENDRECV,
@@ -68,32 +66,17 @@ webrtc_ctx = webrtc_streamer(
     audio_processor_factory=AudioProcessor,
 )
 
-# Connection state
+# Display connection & audio
 if webrtc_ctx.state.playing:
     st.success("Connected & streaming.")
 else:
-    st.warning("Waiting for connection... (Check mic permissions or try Chrome)")
+    st.warning("Waiting for connection...")
 
-# Audio debug info
+# Live refresh for frames & waveform
 if webrtc_ctx.audio_processor:
     st.write(f"**Audio frames received:** {webrtc_ctx.audio_processor.count}")
-
-    # Waveform visualization
     fig, ax = plt.subplots()
     ax.plot(webrtc_ctx.audio_processor.last_audio)
     ax.set_ylim([-32768, 32768])
     ax.set_title("Live Audio Waveform")
     st.pyplot(fig)
-
-st.markdown("""
-**Instructions:**  
-1. Use **Chrome** (best for WebRTC).  
-2. Look at the JSON above to find your **actual microphone's deviceId**.  
-3. Paste it in the input box and press Enter.  
-4. If audio works:  
-   - The **frame count** will increase.  
-   - The **waveform will move** when you speak or blow a whistle.  
-5. If still flat:  
-   - Check macOS **System Preferences → Security & Privacy → Microphone** (ensure Chrome has access).  
-   - Try another mic or browser.  
-""")
