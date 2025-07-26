@@ -16,7 +16,7 @@ class AudioProcessor:
         self.channels = None
         self.last_shape = None
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        # Force interleaved signed 16-bit PCM (correct for WAV)
+        # Force interleaved signed 16-bit PCM
         arr = frame.to_ndarray(format="s16")
         self.last_shape = arr.shape
         self.frames.append(arr.tobytes())
@@ -68,7 +68,7 @@ def plot_waveform(filename, title):
     st.pyplot(fig)
 
 # --- UI ---
-st.title("Audio Capture Tester (Interleaved PCM Fixed)")
+st.title("Audio Capture Tester (Robust)")
 progress = st.progress(0)
 
 webrtc_ctx = webrtc_streamer(
@@ -96,20 +96,24 @@ if webrtc_ctx.audio_processor and st.button("Record Test Clip"):
 
     # --- Save raw ---
     raw_file = "data/test_raw.wav"
-    raw_file, rate, channels = save_audio(frames, raw_file, processor.sample_rate, processor.channels)
-    st.success(f"Raw saved: {raw_file} ({rate}Hz, {channels}ch)")
-    st.write(f"[DEBUG] Last frame shape: {processor.last_shape}")
-    st.audio(raw_file, format="audio/wav")
-    plot_waveform(raw_file, "Raw WebRTC Audio")
+    result = save_audio(frames, raw_file, processor.sample_rate, processor.channels)
+    if not result:
+        st.error("No audio captured. Check mic permissions or try again.")
+    else:
+        raw_file, rate, channels = result
+        st.success(f"Raw saved: {raw_file} ({rate}Hz, {channels}ch)")
+        st.write(f"[DEBUG] Last frame shape: {processor.last_shape}")
+        st.audio(raw_file, format="audio/wav")
+        plot_waveform(raw_file, "Raw WebRTC Audio")
 
-    # --- Save resampled 16k mono ---
-    clean_file = "data/test_resampled.wav"
-    resample_to_16k(raw_file, clean_file)
-    st.success(f"Resampled saved: {clean_file} (16kHz mono)")
-    st.audio(clean_file, format="audio/wav")
-    plot_waveform(clean_file, "Resampled Audio (16kHz Mono)")
+        # --- Save resampled 16k mono ---
+        clean_file = "data/test_resampled.wav"
+        resample_to_16k(raw_file, clean_file)
+        st.success(f"Resampled saved: {clean_file} (16kHz mono)")
+        st.audio(clean_file, format="audio/wav")
+        plot_waveform(clean_file, "Resampled Audio (16kHz Mono)")
 
-    # Debug info
-    st.write(f"**Frames captured:** {len(frames)}")
-    st.write(f"**Raw file size:** {os.path.getsize(raw_file)} bytes")
-    st.write(f"**Resampled file size:** {os.path.getsize(clean_file)} bytes")
+        # Debug info
+        st.write(f"**Frames captured:** {len(frames)}")
+        st.write(f"**Raw file size:** {os.path.getsize(raw_file)} bytes")
+        st.write(f"**Resampled file size:** {os.path.getsize(clean_file)} bytes")
