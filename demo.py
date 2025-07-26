@@ -3,6 +3,7 @@ from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import av, numpy as np
 import matplotlib.pyplot as plt
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 
 # --- TURN/STUN CONFIG ---
 RTC_CONFIGURATION = RTCConfiguration({
@@ -33,7 +34,7 @@ class AudioProcessor:
 st.title("Mic Debug with Auto-Refresh")
 
 # Auto-refresh every 1s
-st.experimental_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=1000, key="refresh")
 
 # Show available devices
 st.markdown("#### Available Audio Devices in Your Browser")
