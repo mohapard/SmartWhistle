@@ -34,7 +34,7 @@ class AudioProcessor:
 st.title("Mic Debug with Auto-Refresh")
 
 # Auto refresh every 1s
-st_autorefresh = st.experimental_rerun  # fallback if needed
+st_autorefresh = st.rerun()  # fallback if needed
 st_autorefresh_interval = 1000
 st_autorefresh = st_autorefresh
 
