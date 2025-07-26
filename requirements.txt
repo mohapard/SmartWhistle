@@ -7,3 +7,4 @@ scikit-learn
 numpy
 matplotlib
 openai
+streamlit_autorefresh
