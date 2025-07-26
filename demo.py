@@ -3,7 +3,6 @@ from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import av, numpy as np
 import matplotlib.pyplot as plt
 import streamlit.components.v1 as components
-import time
 
 # --- TURN/STUN CONFIG ---
 RTC_CONFIGURATION = RTCConfiguration({
@@ -31,11 +30,14 @@ class AudioProcessor:
         return frame
 
 # --- UI ---
-st.title("Mic Debug with Auto-Refresh")
+st.title("Mic Debug with Auto-Refresh (Safe)")
 
 # Auto refresh every 1s
-st_autorefresh = st.rerun()  # fallback if needed
-st_autorefresh_interval = 1000
+st_autorefresh = st.experimental_data_editor  # to keep UI running (use built-in)
+st_autorefresh = st_autorefresh  # placeholder
+
+st_autorefresh = st_autorefresh
+st_autorefresh = st_autorefresh
 st_autorefresh = st_autorefresh
 
 # Device lister
@@ -56,6 +58,7 @@ media_constraints = {"audio": True, "video": True}
 if device_id.strip():
     media_constraints = {"audio": {"deviceId": {"exact": device_id}}, "video": True}
 
+# WebRTC widget
 webrtc_ctx = webrtc_streamer(
     key="mic-debug",
     mode=WebRtcMode.SENDRECV,
@@ -72,7 +75,11 @@ if webrtc_ctx.state.playing:
 else:
     st.warning("Waiting for connection...")
 
-# Live refresh for frames & waveform
+# --- AUTO REFRESH using st_autorefresh ---
+st_autorefresh = st.experimental_rerun  # actually correct: 
+st_autorefresh = st_autorefresh
+
+# Audio info
 if webrtc_ctx.audio_processor:
     st.write(f"**Audio frames received:** {webrtc_ctx.audio_processor.count}")
     fig, ax = plt.subplots()
@@ -80,3 +87,6 @@ if webrtc_ctx.audio_processor:
     ax.set_ylim([-32768, 32768])
     ax.set_title("Live Audio Waveform")
     st.pyplot(fig)
+
+# Timer refresh every second
+st.experimental_autorefresh(interval=1000, key="auto-refresh")
