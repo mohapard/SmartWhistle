@@ -12,60 +12,54 @@ RTC_CONFIGURATION = RTCConfiguration({
 def planar_to_interleaved_pcm16(arr):
     if arr.ndim == 2:  # Planar: (channels, samples)
         arr = arr.T.flatten()  # Convert to interleaved
-    arr = np.clip(arr, -1.0, 1.0)  # Ensure within range
+    arr = np.clip(arr, -1.0, 1.0)  # Keep within range
     return (arr * 32767).astype(np.int16)
 
-# --- AUDIO PROCESSOR ---
+# --- AUDIO PROCESSOR (with full diagnostics) ---
 class AudioProcessor:
     def __init__(self):
         self.frames = []
         self.sample_rate = None
         self.channels = None
         self.last_shape = None
+        self.last_format = None
+        self.last_layout = None
+        self.last_samples = None
+
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        arr = frame.to_ndarray()  # Planar float32
+        # Capture diagnostics
+        self.last_format = frame.format.name
+        self.last_layout = frame.layout.name
+        self.last_samples = frame.samples
+        self.sample_rate = frame.sample_rate
+        self.channels = frame.layout.channels
+
+        # Log to console (for debugging)
+        print(f"[DEBUG] Frame: format={self.last_format}, layout={self.last_layout}, "
+              f"rate={self.sample_rate}, channels={self.channels}, samples={self.last_samples}")
+
+        # Convert to interleaved PCM16
+        arr = frame.to_ndarray()
         self.last_shape = arr.shape
         pcm16 = planar_to_interleaved_pcm16(arr)
         self.frames.append(pcm16.tobytes())
-        if self.sample_rate is None:
-            self.sample_rate = frame.sample_rate
-        if self.channels is None:
-            try:
-                self.channels = int(frame.layout.channels)
-            except Exception:
-                self.channels = arr.shape[0] if arr.ndim > 1 else 1
         return frame
 
-# --- RAW SAVE FUNCTION ---
+# --- Save WAV ---
 def save_audio(frames, filename, rate=None, channels=None):
     if not frames:
         print("[DEBUG] No frames to save.")
         return None
-    try:
-        rate = int(rate) if rate else 48000
-    except Exception:
-        rate = 48000
-    try:
-        channels = int(channels) if channels else 1
-    except Exception:
-        channels = 1
+    rate = int(rate) if rate else 48000
+    channels = int(channels) if channels else 1
     with wave.open(filename, 'wb') as wf:
         wf.setnchannels(channels)
-        wf.setsampwidth(2)  # 16-bit PCM
+        wf.setsampwidth(2)  # 16-bit
         wf.setframerate(rate)
         wf.writeframes(b''.join(frames))
     return filename, rate, channels
 
-# --- RESAMPLING TO 16k MONO ---
-def resample_to_16k(input_file, output_file):
-    data, sr = sf.read(input_file)
-    if data.ndim > 1:
-        data = np.mean(data, axis=1)  # Stereo → mono
-    resampled = librosa.resample(data.astype(np.float32), orig_sr=sr, target_sr=16000)
-    sf.write(output_file, resampled, 16000, subtype='PCM_16')
-    return output_file
-
-# --- WAVEFORM PLOT ---
+# --- Plot waveform ---
 def plot_waveform(filename, title):
     data, sr = sf.read(filename)
     fig, ax = plt.subplots()
@@ -74,11 +68,11 @@ def plot_waveform(filename, title):
     st.pyplot(fig)
 
 # --- UI ---
-st.title("Audio Capture Tester (Planar → Interleaved Fix)")
+st.title("Golden Diagnostic Audio Tester")
 progress = st.progress(0)
 
 webrtc_ctx = webrtc_streamer(
-    key="recorder",
+    key="diagnostic",
     mode=WebRtcMode.SENDONLY,
     rtc_configuration=RTC_CONFIGURATION,
     media_stream_constraints={"audio": True, "video": False},
@@ -87,7 +81,7 @@ webrtc_ctx = webrtc_streamer(
     sendback_audio=False
 )
 
-if webrtc_ctx.audio_processor and st.button("Record Test Clip"):
+if webrtc_ctx.audio_processor and st.button("Record & Diagnose"):
     processor = webrtc_ctx.audio_processor
     processor.frames.clear()
     frames = []
@@ -100,26 +94,21 @@ if webrtc_ctx.audio_processor and st.button("Record Test Clip"):
         progress.progress(int(((time.time() - start) / DURATION) * 100))
         time.sleep(0.05)
 
-    # --- Save raw ---
-    raw_file = "data/test_raw.wav"
+    # --- Save file ---
+    raw_file = "data/diagnostic.wav"
     result = save_audio(frames, raw_file, processor.sample_rate, processor.channels)
     if not result:
         st.error("No audio captured. Check mic permissions or try again.")
     else:
         raw_file, rate, channels = result
-        st.success(f"Raw saved: {raw_file} ({rate}Hz, {channels}ch)")
-        st.write(f"[DEBUG] Last frame shape: {processor.last_shape}")
+        st.success(f"Saved: {raw_file} ({rate}Hz, {channels}ch)")
+        st.write(f"**Frame format:** {processor.last_format}")
+        st.write(f"**Layout:** {processor.last_layout}")
+        st.write(f"**Samples per frame:** {processor.last_samples}")
+        st.write(f"**NDArray shape:** {processor.last_shape}")
         st.audio(raw_file, format="audio/wav")
-        plot_waveform(raw_file, "Raw WebRTC Audio")
-
-        # --- Save resampled 16k mono ---
-        clean_file = "data/test_resampled.wav"
-        resample_to_16k(raw_file, clean_file)
-        st.success(f"Resampled saved: {clean_file} (16kHz mono)")
-        st.audio(clean_file, format="audio/wav")
-        plot_waveform(clean_file, "Resampled Audio (16kHz Mono)")
+        plot_waveform(raw_file, "Captured Audio")
 
         # Debug info
         st.write(f"**Frames captured:** {len(frames)}")
-        st.write(f"**Raw file size:** {os.path.getsize(raw_file)} bytes")
-        st.write(f"**Resampled file size:** {os.path.getsize(clean_file)} bytes")
+        st.write(f"**File size:** {os.path.getsize(raw_file)} bytes")
