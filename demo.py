@@ -5,7 +5,6 @@ import numpy as np
 import openai, librosa
 from sklearn.linear_model import LogisticRegression
 from datetime import datetime
-from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIG ---
 openai.api_key = st.secrets["openai_key"]
@@ -25,19 +24,6 @@ RTC_CONFIGURATION = RTCConfiguration({
         }
     ]
 })
-
-# --- SESSION STATE INIT ---
-defaults = {
-    "recording_state": "idle",
-    "whistle_frames": [],
-    "note_frames": [],
-    "whistle_start": None,
-    "note_start": None,
-    "events": [],
-    "whistle_type": None
-}
-for k, v in defaults.items():
-    if k not in st.session_state: st.session_state[k] = v
 
 # --- HELPERS ---
 def save_audio(frames, filename, rate=RATE):
@@ -74,17 +60,14 @@ class AudioProcessor:
     def __init__(self):
         self.frames = []
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        pcm = frame.to_ndarray().astype(np.int16).tobytes()
-        self.frames.append(pcm)
+        self.frames.append(frame.to_ndarray().astype(np.int16).tobytes())
         return frame
 
 # --- UI ---
 st.title("Smart Whistle Logger")
-st_autorefresh(interval=500, key="refresh")
 status_box = st.empty()
 progress = st.progress(0)
 
-# --- WEBRTC ---
 webrtc_ctx = webrtc_streamer(
     key="recorder",
     mode=WebRtcMode.SENDONLY,
@@ -95,65 +78,48 @@ webrtc_ctx = webrtc_streamer(
     sendback_audio=False
 )
 
-# --- FRAME PULLER (main thread pulls from processor) ---
-if webrtc_ctx.audio_processor:
-    buffered = webrtc_ctx.audio_processor.frames
-    if buffered:
-        if st.session_state.recording_state == "whistle":
-            st.session_state.whistle_frames.extend(buffered)
-        elif st.session_state.recording_state == "note":
-            st.session_state.note_frames.extend(buffered)
-        webrtc_ctx.audio_processor.frames = []  # clear buffer
+if "events" not in st.session_state: 
+    st.session_state.events = []
 
-# --- STATE MACHINE ---
-now = time.time()
+# --- MAIN FLOW ---
+if webrtc_ctx.audio_processor and st.button("Log Event"):
+    processor = webrtc_ctx.audio_processor
+    processor.frames.clear()
+    status_box.info("Blow your whistle now!")
+    frames = []
+    start = time.time()
+    # --- Record Whistle ---
+    while time.time() - start < WHISTLE_DURATION:
+        if processor.frames:
+            frames.extend(processor.frames)
+            processor.frames.clear()
+        progress.progress(int(((time.time() - start) / WHISTLE_DURATION) * 100))
+        time.sleep(0.05)
+    save_audio(frames, "whistle.wav")
+    whistle_type = predict_whistle("whistle.wav")
+    status_box.success(f"Whistle detected: {whistle_type}")
 
-# Start button
-if webrtc_ctx.audio_receiver and st.button("Log Event"):
-    st.session_state.recording_state = "whistle"
-    st.session_state.whistle_start = now
-    st.session_state.whistle_frames = []
-    st.session_state.note_frames = []
-    st.session_state.whistle_type = None
-    print("[DEBUG] Started whistle recording")
+    # --- Record Note ---
+    status_box.info("Speak your note now!")
+    processor.frames.clear()
+    note_frames = []
+    start = time.time()
+    while time.time() - start < NOTE_DURATION:
+        if processor.frames:
+            note_frames.extend(processor.frames)
+            processor.frames.clear()
+        progress.progress(int(((time.time() - start) / NOTE_DURATION) * 100))
+        time.sleep(0.05)
+    save_audio(note_frames, "voice_note.wav")
+    transcription = transcribe_audio("voice_note.wav")
+    st.success(f"Whistle: {whistle_type}")
+    st.write(f"**Transcript:** {transcription}")
 
-# WHISTLE PHASE
-if st.session_state.recording_state == "whistle":
-    elapsed = now - st.session_state.whistle_start
-    progress.progress(min(int((elapsed / WHISTLE_DURATION) * 100), 100))
-    status_box.info(f"Blow your whistle... ({elapsed:.1f}/{WHISTLE_DURATION}s)")
-    if elapsed >= WHISTLE_DURATION:
-        save_audio(st.session_state.whistle_frames, "whistle.wav")
-        whistle_type = predict_whistle("whistle.wav")
-        st.session_state.whistle_type = whistle_type
-        st.session_state.recording_state = "note"
-        st.session_state.note_start = now
-        print(f"[DEBUG] Whistle captured: {whistle_type}")
-
-# NOTE PHASE
-elif st.session_state.recording_state == "note":
-    elapsed = now - st.session_state.note_start
-    progress.progress(min(int((elapsed / NOTE_DURATION) * 100), 100))
-    status_box.info(f"Recording voice note... ({elapsed:.1f}/{NOTE_DURATION}s)")
-    if elapsed >= NOTE_DURATION:
-        save_audio(st.session_state.note_frames, "voice_note.wav")
-        transcription = transcribe_audio("voice_note.wav")
-        whistle_type = st.session_state.whistle_type or "Unknown"
-        st.session_state.events.append({
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "whistle": whistle_type,
-            "note": transcription
-        })
-        st.success(f"Whistle: {whistle_type}")
-        st.write(f"**Transcript:** {transcription}")
-        st.session_state.recording_state = "idle"
-        progress.progress(0)
-        print(f"[DEBUG] Note recorded & transcribed: {transcription}")
-
-# IDLE
-elif st.session_state.recording_state == "idle":
-    status_box.info("Idle - Click 'Log Event' to start")
-    progress.progress(0)
+    st.session_state.events.append({
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "whistle": whistle_type,
+        "note": transcription
+    })
 
 # --- Event Log ---
 st.write("### Event Log")
