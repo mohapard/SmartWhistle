@@ -66,7 +66,7 @@ def transcribe_audio(filename):
         transcript = openai.audio.transcriptions.create(model="gpt-4o-transcribe", file=f)
     return transcript.text
 
-# --- Audio Processor with State Machine ---
+# --- Audio Processor with Event-driven State ---
 class AudioProcessor:
     def __init__(self):
         self.frames = []
@@ -81,23 +81,24 @@ class AudioProcessor:
         self.state = "whistle"
         self.start_time = time.time()
         st.session_state.status = "Recording whistle..."
-
-    def start_note(self):
-        self.frames.clear()
-        self.state = "note"
-        self.start_time = time.time()
-        self.silent_chunks = 0
-        st.session_state.status = "Recording voice note (speak now)..."
+        st.rerun()
 
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
         pcm = frame.to_ndarray().tobytes()
 
+        # Whistle phase
         if self.state == "whistle":
             self.frames.append(pcm)
             if time.time() - self.start_time >= WHISTLE_DURATION:
                 self.whistle_frames = self.frames.copy()
-                self.start_note()
+                self.frames.clear()
+                self.state = "note"
+                self.start_time = time.time()
+                self.silent_chunks = 0
+                st.session_state.status = "Recording voice note (speak)..."
+                st.rerun()
 
+        # Voice note phase
         elif self.state == "note":
             self.frames.append(pcm)
             audio_data = np.frombuffer(pcm, dtype=np.int16)
@@ -105,17 +106,17 @@ class AudioProcessor:
                 self.silent_chunks += 1
             else:
                 self.silent_chunks = 0
+            # Stop on silence or max length
             if (self.silent_chunks > int(44100 / 1024 * SILENCE_STOP)) or (time.time() - self.start_time >= VOICE_MAX):
                 self.note_frames = self.frames.copy()
                 self.state = "done"
                 st.session_state.status = "Processing..."
+                st.rerun()
 
         return frame
 
 # --- UI ---
 st.title("Smart Whistle Logger")
-st.write("One click: Record whistle → voice note → transcribe → log.")
-
 status_box = st.empty()
 status_box.info(st.session_state.status)
 
@@ -128,16 +129,14 @@ webrtc_ctx = webrtc_streamer(
     audio_processor_factory=AudioProcessor,
 )
 
+# --- Start Recording ---
 if webrtc_ctx.audio_receiver and st.button("Log Event"):
     processor = webrtc_ctx.audio_processor
     if processor:
         processor.start_whistle()
         st.session_state.recording_state = "recording"
-
-if webrtc_ctx.audio_processor and webrtc_ctx.audio_processor.state == "note":
-    if st.button("STOP Recording"):
-        webrtc_ctx.audio_processor.state = "done"
-        st.session_state.status = "Processing..."
+        st.session_state.status = "Recording whistle..."
+        st.rerun()
 
 # --- When done: process results ---
 if webrtc_ctx.audio_processor and webrtc_ctx.audio_processor.state == "done" and st.session_state.recording_state == "recording":
@@ -161,6 +160,7 @@ if webrtc_ctx.audio_processor and webrtc_ctx.audio_processor.state == "done" and
     st.session_state.recording_state = "idle"
     webrtc_ctx.audio_processor.state = "idle"
     st.session_state.status = "Idle"
+    st.rerun()
 
 # --- Event Log ---
 st.write("### Event Log")
