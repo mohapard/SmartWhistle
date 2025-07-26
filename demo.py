@@ -8,14 +8,14 @@ RTC_CONFIGURATION = RTCConfiguration({
     "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 })
 
-# --- Convert planar float32 → interleaved int16 PCM ---
-def planar_to_interleaved_pcm16(arr):
-    if arr.ndim == 2:  # Planar: (channels, samples)
-        arr = arr.T.flatten()  # Convert to interleaved
-    arr = np.clip(arr, -1.0, 1.0)  # Keep within valid range
+# --- Convert float planar → interleaved PCM16 ---
+def float_to_pcm16(arr):
+    if arr.ndim == 2:  # planar (channels, samples)
+        arr = arr.T.flatten()
+    arr = np.clip(arr, -1.0, 1.0)
     return (arr * 32767).astype(np.int16)
 
-# --- AUDIO PROCESSOR (with diagnostics) ---
+# --- AUDIO PROCESSOR ---
 class AudioProcessor:
     def __init__(self):
         self.frames = []
@@ -27,7 +27,6 @@ class AudioProcessor:
         self.last_samples = None
 
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        # Capture diagnostics
         self.last_format = frame.format.name
         self.last_layout = frame.layout.name
         self.last_samples = frame.samples
@@ -35,38 +34,35 @@ class AudioProcessor:
         try:
             self.channels = frame.layout.nb_channels
         except Exception:
-            self.channels = 1  # Fallback to mono if unavailable
+            self.channels = 1
 
-        # Log to server console
-        print(f"[DEBUG] Frame: format={self.last_format}, layout={self.last_layout}, "
-              f"rate={self.sample_rate}, channels={self.channels}, samples={self.last_samples}")
-
-        # Convert to interleaved PCM16
-        arr = frame.to_ndarray()
-        self.last_shape = arr.shape
-        pcm16 = planar_to_interleaved_pcm16(arr)
-        self.frames.append(pcm16.tobytes())
+        # Capture raw PCM bytes depending on format
+        if self.last_format == "s16":
+            pcm_bytes = frame.planes[0].to_bytes()  # already PCM16 interleaved
+        else:
+            arr = frame.to_ndarray()
+            self.last_shape = arr.shape
+            pcm_bytes = float_to_pcm16(arr).tobytes()
+        self.frames.append(pcm_bytes)
         return frame
 
 # --- Save WAV ---
-def save_audio(frames, filename, rate=None, channels=None):
-    if not frames:
-        print("[DEBUG] No frames to save.")
-        return None
-    try:
-        rate = int(rate) if rate else 48000
-    except Exception:
-        rate = 48000
-    try:
-        channels = int(channels) if isinstance(channels, (int, float)) else 1
-    except Exception:
-        channels = 1
+def save_wav(frames, filename, rate, channels):
     with wave.open(filename, 'wb') as wf:
-        wf.setnchannels(channels)
+        wf.setnchannels(int(channels))
         wf.setsampwidth(2)  # 16-bit PCM
-        wf.setframerate(rate)
+        wf.setframerate(int(rate))
         wf.writeframes(b''.join(frames))
-    return filename, rate, channels
+    return filename
+
+# --- Resample to 16k mono for Whisper ---
+def resample_to_16k(input_file, output_file):
+    data, sr = sf.read(input_file)
+    if data.ndim > 1:
+        data = np.mean(data, axis=1)
+    resampled = librosa.resample(data.astype(np.float32), orig_sr=sr, target_sr=16000)
+    sf.write(output_file, resampled, 16000, subtype='PCM_16')
+    return output_file
 
 # --- Plot waveform ---
 def plot_waveform(filename, title):
@@ -77,11 +73,11 @@ def plot_waveform(filename, title):
     st.pyplot(fig)
 
 # --- UI ---
-st.title("Golden Diagnostic Audio Tester")
+st.title("Golden Audio Recorder (Raw + Whisper-ready)")
 progress = st.progress(0)
 
 webrtc_ctx = webrtc_streamer(
-    key="diagnostic",
+    key="golden",
     mode=WebRtcMode.SENDONLY,
     rtc_configuration=RTC_CONFIGURATION,
     media_stream_constraints={"audio": True, "video": False},
@@ -90,7 +86,7 @@ webrtc_ctx = webrtc_streamer(
     sendback_audio=False
 )
 
-if webrtc_ctx.audio_processor and st.button("Record & Diagnose"):
+if webrtc_ctx.audio_processor and st.button("Record & Save Both"):
     processor = webrtc_ctx.audio_processor
     processor.frames.clear()
     frames = []
@@ -103,21 +99,23 @@ if webrtc_ctx.audio_processor and st.button("Record & Diagnose"):
         progress.progress(int(((time.time() - start) / DURATION) * 100))
         time.sleep(0.05)
 
-    # --- Save file ---
-    raw_file = "data/diagnostic.wav"
-    result = save_audio(frames, raw_file, processor.sample_rate, processor.channels)
-    if not result:
+    if not frames:
         st.error("No audio captured. Check mic permissions or try again.")
     else:
-        raw_file, rate, channels = result
-        st.success(f"Saved: {raw_file} ({rate}Hz, {channels}ch)")
-        st.write(f"**Frame format:** {processor.last_format}")
+        # --- Save RAW 48kHz stereo ---
+        raw_file = "data/golden_raw.wav"
+        save_wav(frames, raw_file, processor.sample_rate or 48000, processor.channels or 2)
+        st.success(f"Raw saved: {raw_file} ({processor.sample_rate}Hz, {processor.channels}ch)")
+        st.write(f"**Format:** {processor.last_format}")
         st.write(f"**Layout:** {processor.last_layout}")
-        st.write(f"**Samples per frame:** {processor.last_samples}")
+        st.write(f"**Samples/frame:** {processor.last_samples}")
         st.write(f"**NDArray shape:** {processor.last_shape}")
         st.audio(raw_file, format="audio/wav")
-        plot_waveform(raw_file, "Captured Audio")
+        plot_waveform(raw_file, "Raw 48kHz Audio")
 
-        # Debug info
-        st.write(f"**Frames captured:** {len(frames)}")
-        st.write(f"**File size:** {os.path.getsize(raw_file)} bytes")
+        # --- Save Whisper-ready 16kHz mono ---
+        whisper_file = "data/golden_whisper.wav"
+        resample_to_16k(raw_file, whisper_file)
+        st.success(f"Whisper-ready saved: {whisper_file} (16kHz mono)")
+        st.audio(whisper_file, format="audio/wav")
+        plot_waveform(whisper_file, "Whisper 16kHz Mono")
