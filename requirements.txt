@@ -1,7 +1,9 @@
 streamlit
-streamlit-webrtc
-openai
+streamlit-webrtc>=0.47.1
+aiortc>=1.5.0
+aioice>=0.9.0
 librosa>=0.10.2
 scikit-learn
 numpy
 matplotlib
+openai
