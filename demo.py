@@ -2,6 +2,7 @@ import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import av, numpy as np
 import matplotlib.pyplot as plt
+import streamlit.components.v1 as components
 
 # --- TURN/STUN CONFIG ---
 RTC_CONFIGURATION = RTCConfiguration({
@@ -29,11 +30,24 @@ class AudioProcessor:
         return frame
 
 # --- UI ---
-st.title("Microphone Debug with Waveform & Device Selector")
+st.title("Microphone Debug with Device Selection & Waveform")
 
-# Device selection
-st.markdown("#### Select Microphone Device")
-device_id = st.text_input("Optional: Enter exact device ID (leave empty for default mic)")
+# Show available devices using JS
+st.markdown("#### Available Audio Devices in Your Browser")
+components.html("""
+<script>
+navigator.mediaDevices.enumerateDevices().then(devices => {
+  const audioDevices = devices.filter(d => d.kind === 'audioinput');
+  const pre = document.createElement('pre');
+  pre.textContent = JSON.stringify(audioDevices, null, 2);
+  document.body.appendChild(pre);
+});
+</script>
+""", height=300)
+
+# Device selection dropdown
+st.markdown("#### Select Microphone")
+device_id = st.text_input("Enter deviceId (see above JSON). Leave empty for default mic:")
 
 # Build media constraints
 media_constraints = {"audio": True, "video": True}  # dummy video track
@@ -58,7 +72,7 @@ webrtc_ctx = webrtc_streamer(
 if webrtc_ctx.state.playing:
     st.success("Connected & streaming.")
 else:
-    st.warning("Waiting for connection... (Check permissions or try Chrome)")
+    st.warning("Waiting for connection... (Check mic permissions or try Chrome)")
 
 # Audio debug info
 if webrtc_ctx.audio_processor:
@@ -73,11 +87,13 @@ if webrtc_ctx.audio_processor:
 
 st.markdown("""
 **Instructions:**  
-1. Make sure Chrome is used (best for WebRTC).  
-2. Select the correct microphone in the widget **or enter its device ID** above (you can find device IDs using `navigator.mediaDevices.enumerateDevices()` in browser console).  
-3. Speak or blow a whistle — if audio works, the **frame counter will increase** and the **waveform will move**.  
-4. If frame count stays at 0:  
-   - Check macOS **System Preferences → Security & Privacy → Microphone** → Ensure your browser/Python has mic access.  
-   - Try entering a specific device ID.  
-   - Test on another browser or network.
+1. Use **Chrome** (best for WebRTC).  
+2. Look at the JSON above to find your **actual microphone's deviceId**.  
+3. Paste it in the input box and press Enter.  
+4. If audio works:  
+   - The **frame count** will increase.  
+   - The **waveform will move** when you speak or blow a whistle.  
+5. If still flat:  
+   - Check macOS **System Preferences → Security & Privacy → Microphone** (ensure Chrome has access).  
+   - Try another mic or browser.  
 """)
