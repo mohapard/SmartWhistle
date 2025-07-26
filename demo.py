@@ -1,9 +1,8 @@
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode
-import av, wave, time, shutil, os, pickle
+import av, wave, os, pickle, time, shutil
 import numpy as np
-import openai
-import librosa, librosa.display
+import openai, librosa, librosa.display
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 from datetime import datetime
@@ -21,6 +20,7 @@ os.makedirs(DATASET_DIR, exist_ok=True)
 # --- SESSION STATE ---
 if "events" not in st.session_state: st.session_state.events = []
 if "labels" not in st.session_state: st.session_state.labels = {"single": [], "double": []}
+if "recording_state" not in st.session_state: st.session_state.recording_state = "idle"
 
 # --- AUDIO HELPERS ---
 def save_audio(frames, filename="sample.wav", rate=44100):
@@ -66,40 +66,54 @@ def transcribe_audio(filename):
         transcript = openai.audio.transcriptions.create(model="gpt-4o-transcribe", file=f)
     return transcript.text
 
-# --- Audio Processor for WebRTC ---
+# --- Audio Processor with State Machine ---
 class AudioProcessor:
-    def __init__(self): self.frames = []
+    def __init__(self):
+        self.frames = []
+        self.whistle_frames = []
+        self.note_frames = []
+        self.state = "idle"
+        self.start_time = None
+        self.silent_chunks = 0
+
+    def start_whistle(self):
+        self.frames.clear()
+        self.state = "whistle"
+        self.start_time = time.time()
+
+    def start_note(self):
+        self.frames.clear()
+        self.state = "note"
+        self.start_time = time.time()
+        self.silent_chunks = 0
+
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
         pcm = frame.to_ndarray().tobytes()
-        self.frames.append(pcm)
-        return frame
 
-# --- SILENCE DETECTION ---
-def capture_until_silence(frames, start_idx=0, min_len=1, max_len=VOICE_MAX, silence_stop=SILENCE_STOP, silence_thresh=SILENCE_THRESHOLD, rate=44100):
-    captured = []
-    silent_chunks, start_time = 0, time.time()
-    chunk_size = 1024
-    max_chunks = int(rate / chunk_size * max_len)
-    while True:
-        if len(frames) > start_idx:
-            frame = frames[start_idx]
-            captured.append(frame)
-            start_idx += 1
-            audio_data = np.frombuffer(frame, dtype=np.int16)
-            if np.max(np.abs(audio_data)) < silence_thresh:
-                silent_chunks += 1
+        if self.state == "whistle":
+            self.frames.append(pcm)
+            if time.time() - self.start_time >= WHISTLE_DURATION:
+                self.whistle_frames = self.frames.copy()
+                self.start_note()  # automatically switch to note recording
+
+        elif self.state == "note":
+            self.frames.append(pcm)
+            audio_data = np.frombuffer(pcm, dtype=np.int16)
+            if np.max(np.abs(audio_data)) < SILENCE_THRESHOLD:
+                self.silent_chunks += 1
             else:
-                silent_chunks = 0
-        if len(captured) >= max_chunks: break
-        if silent_chunks > int(rate / chunk_size * silence_stop) and (time.time() - start_time) > min_len:
-            break
-        time.sleep(0.05)
-    return captured
+                self.silent_chunks = 0
+            if self.silent_chunks > int(44100 / 1024 * SILENCE_STOP) or time.time() - self.start_time >= VOICE_MAX:
+                self.note_frames = self.frames.copy()
+                self.state = "done"
+
+        return frame
 
 # --- UI ---
 st.title("Smart Whistle Logger")
 
-st.write("Click below to log a whistle event (detect whistle → record note → transcribe → log):")
+st.write("One click: Record whistle → voice note → transcribe → log.")
+
 webrtc_ctx = webrtc_streamer(
     key="recorder",
     mode=WebRtcMode.SENDRECV,
@@ -109,42 +123,34 @@ webrtc_ctx = webrtc_streamer(
     audio_processor_factory=AudioProcessor,
 )
 
+# --- One-click logic ---
 if webrtc_ctx.audio_receiver and st.button("Log Event"):
     processor = webrtc_ctx.audio_processor
     if processor:
-        # Reset buffer
-        processor.frames.clear()
+        processor.start_whistle()
+        st.session_state.recording_state = "recording"
 
-        # --- Step 1: Whistle ---
-        st.info("Recording whistle...")
-        start = time.time()
-        while time.time() - start < WHISTLE_DURATION:
-            time.sleep(0.05)
-        whistle_frames = processor.frames.copy()
-        save_audio(whistle_frames, "whistle.wav")
-        whistle_type = predict_whistle("whistle.wav")
-        st.success(f"Whistle detected: {whistle_type}")
+# --- Post-processing once done ---
+if webrtc_ctx.audio_processor and webrtc_ctx.audio_processor.state == "done" and st.session_state.recording_state == "recording":
+    processor = webrtc_ctx.audio_processor
+    whistle_file, voice_file = "whistle.wav", "voice_note.wav"
+    save_audio(processor.whistle_frames, whistle_file)
+    save_audio(processor.note_frames, voice_file)
+    whistle_type = predict_whistle(whistle_file)
+    transcription = transcribe_audio(voice_file)
 
-        # --- Step 2: Voice Note ---
-        st.info("Recording voice note...")
-        processor.frames.clear()
-        voice_frames = capture_until_silence(processor.frames)
-        save_audio(voice_frames, "voice_note.wav")
-        st.success("Voice note captured.")
+    # Log event
+    event = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "whistle": whistle_type,
+        "note": transcription
+    }
+    st.session_state.events.append(event)
 
-        # --- Step 3: Transcribe ---
-        st.info("Transcribing...")
-        transcription = transcribe_audio("voice_note.wav")
-        st.write(f"**Transcript:** {transcription}")
-
-        # --- Step 4: Log Event ---
-        event = {
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "whistle": whistle_type,
-            "note": transcription
-        }
-        st.session_state.events.append(event)
-        st.success("Event logged!")
+    st.success(f"Whistle: {whistle_type}")
+    st.write(f"**Transcript:** {transcription}")
+    st.session_state.recording_state = "idle"
+    processor.state = "idle"
 
 # --- Event Log ---
 st.write("### Event Log")
