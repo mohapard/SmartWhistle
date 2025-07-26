@@ -14,13 +14,19 @@ class AudioProcessor:
         self.frames = []
         self.sample_rate = None
         self.channels = None
+        self.last_shape = None
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        arr = frame.to_ndarray().astype(np.int16)
+        # Force interleaved signed 16-bit PCM (correct for WAV)
+        arr = frame.to_ndarray(format="s16")
+        self.last_shape = arr.shape
         self.frames.append(arr.tobytes())
         if self.sample_rate is None:
             self.sample_rate = frame.sample_rate
         if self.channels is None:
-            self.channels = frame.layout.channels
+            try:
+                self.channels = int(frame.layout.channels)
+            except Exception:
+                self.channels = arr.shape[1] if len(arr.shape) > 1 else 1
         return frame
 
 # --- RAW SAVE FUNCTION ---
@@ -28,7 +34,7 @@ def save_audio(frames, filename, rate=None, channels=None):
     if not frames:
         print("[DEBUG] No frames to save.")
         return None
-    # Force clean int values
+    # Fallbacks
     try:
         rate = int(rate) if rate else 48000
     except Exception:
@@ -37,10 +43,9 @@ def save_audio(frames, filename, rate=None, channels=None):
         channels = int(channels) if channels else 1
     except Exception:
         channels = 1
-
     with wave.open(filename, 'wb') as wf:
         wf.setnchannels(channels)
-        wf.setsampwidth(2)
+        wf.setsampwidth(2)  # 16-bit PCM
         wf.setframerate(rate)
         wf.writeframes(b''.join(frames))
     return filename, rate, channels
@@ -63,7 +68,7 @@ def plot_waveform(filename, title):
     st.pyplot(fig)
 
 # --- UI ---
-st.title("Audio Capture Tester (Raw vs Resampled)")
+st.title("Audio Capture Tester (Interleaved PCM Fixed)")
 progress = st.progress(0)
 
 webrtc_ctx = webrtc_streamer(
@@ -93,6 +98,7 @@ if webrtc_ctx.audio_processor and st.button("Record Test Clip"):
     raw_file = "data/test_raw.wav"
     raw_file, rate, channels = save_audio(frames, raw_file, processor.sample_rate, processor.channels)
     st.success(f"Raw saved: {raw_file} ({rate}Hz, {channels}ch)")
+    st.write(f"[DEBUG] Last frame shape: {processor.last_shape}")
     st.audio(raw_file, format="audio/wav")
     plot_waveform(raw_file, "Raw WebRTC Audio")
 
