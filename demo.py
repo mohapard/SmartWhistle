@@ -2,8 +2,7 @@ import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode
 import av, wave, os, pickle, time, shutil
 import numpy as np
-import openai, librosa, librosa.display
-import matplotlib.pyplot as plt
+import openai, librosa
 from sklearn.linear_model import LogisticRegression
 from datetime import datetime
 
@@ -21,6 +20,7 @@ os.makedirs(DATASET_DIR, exist_ok=True)
 if "events" not in st.session_state: st.session_state.events = []
 if "labels" not in st.session_state: st.session_state.labels = {"single": [], "double": []}
 if "recording_state" not in st.session_state: st.session_state.recording_state = "idle"
+if "status" not in st.session_state: st.session_state.status = "Idle"
 
 # --- AUDIO HELPERS ---
 def save_audio(frames, filename="sample.wav", rate=44100):
@@ -56,7 +56,7 @@ def load_model():
 
 def predict_whistle(filename):
     model = load_model()
-    if model is None: return "Untrained"
+    if model is None: return "Unknown Whistle"
     features = extract_mel(filename).reshape(1, -1)
     return "Single" if model.predict(features)[0] == 0 else "Double"
 
@@ -80,12 +80,14 @@ class AudioProcessor:
         self.frames.clear()
         self.state = "whistle"
         self.start_time = time.time()
+        st.session_state.status = "Recording whistle..."
 
     def start_note(self):
         self.frames.clear()
         self.state = "note"
         self.start_time = time.time()
         self.silent_chunks = 0
+        st.session_state.status = "Recording voice note (speak now)..."
 
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
         pcm = frame.to_ndarray().tobytes()
@@ -94,7 +96,7 @@ class AudioProcessor:
             self.frames.append(pcm)
             if time.time() - self.start_time >= WHISTLE_DURATION:
                 self.whistle_frames = self.frames.copy()
-                self.start_note()  # automatically switch to note recording
+                self.start_note()
 
         elif self.state == "note":
             self.frames.append(pcm)
@@ -103,16 +105,19 @@ class AudioProcessor:
                 self.silent_chunks += 1
             else:
                 self.silent_chunks = 0
-            if self.silent_chunks > int(44100 / 1024 * SILENCE_STOP) or time.time() - self.start_time >= VOICE_MAX:
+            if (self.silent_chunks > int(44100 / 1024 * SILENCE_STOP)) or (time.time() - self.start_time >= VOICE_MAX):
                 self.note_frames = self.frames.copy()
                 self.state = "done"
+                st.session_state.status = "Processing..."
 
         return frame
 
 # --- UI ---
 st.title("Smart Whistle Logger")
-
 st.write("One click: Record whistle → voice note → transcribe → log.")
+
+status_box = st.empty()
+status_box.info(st.session_state.status)
 
 webrtc_ctx = webrtc_streamer(
     key="recorder",
@@ -123,14 +128,18 @@ webrtc_ctx = webrtc_streamer(
     audio_processor_factory=AudioProcessor,
 )
 
-# --- One-click logic ---
 if webrtc_ctx.audio_receiver and st.button("Log Event"):
     processor = webrtc_ctx.audio_processor
     if processor:
         processor.start_whistle()
         st.session_state.recording_state = "recording"
 
-# --- Post-processing once done ---
+if webrtc_ctx.audio_processor and webrtc_ctx.audio_processor.state == "note":
+    if st.button("STOP Recording"):
+        webrtc_ctx.audio_processor.state = "done"
+        st.session_state.status = "Processing..."
+
+# --- When done: process results ---
 if webrtc_ctx.audio_processor and webrtc_ctx.audio_processor.state == "done" and st.session_state.recording_state == "recording":
     processor = webrtc_ctx.audio_processor
     whistle_file, voice_file = "whistle.wav", "voice_note.wav"
@@ -150,7 +159,8 @@ if webrtc_ctx.audio_processor and webrtc_ctx.audio_processor.state == "done" and
     st.success(f"Whistle: {whistle_type}")
     st.write(f"**Transcript:** {transcription}")
     st.session_state.recording_state = "idle"
-    processor.state = "idle"
+    webrtc_ctx.audio_processor.state = "idle"
+    st.session_state.status = "Idle"
 
 # --- Event Log ---
 st.write("### Event Log")
