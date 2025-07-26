@@ -27,13 +27,16 @@ RTC_CONFIGURATION = RTCConfiguration({
 
 # --- HELPERS ---
 def save_audio(frames, filename, rate=RATE):
+    print(f"[DEBUG] Saving {len(frames)} frames to {filename}")
     with wave.open(filename, 'wb') as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(rate)
         wf.writeframes(b''.join(frames))
+    print(f"[DEBUG] Saved file: {filename} ({os.path.getsize(filename)} bytes)")
 
 def extract_mel(filename):
+    print(f"[DEBUG] Extracting MEL features from {filename}")
     y, sr = librosa.load(filename, sr=22050)
     y = librosa.util.fix_length(y, size=sr * WHISTLE_DURATION)
     mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=40)
@@ -46,13 +49,19 @@ def load_model():
 
 def predict_whistle(filename):
     model = load_model()
-    if model is None: return "Unknown Whistle"
+    if model is None:
+        print("[DEBUG] No model found, returning Unknown Whistle")
+        return "Unknown Whistle"
     features = extract_mel(filename).reshape(1, -1)
-    return "Single" if model.predict(features)[0] == 0 else "Double"
+    result = "Single" if model.predict(features)[0] == 0 else "Double"
+    print(f"[DEBUG] Whistle classified as {result}")
+    return result
 
 def transcribe_audio(filename):
+    print(f"[DEBUG] Sending {filename} for transcription...")
     with open(filename, "rb") as f:
         transcript = openai.audio.transcriptions.create(model="gpt-4o-transcribe", file=f)
+    print("[DEBUG] Transcription completed.")
     return transcript.text
 
 # --- AUDIO PROCESSOR ---
@@ -64,7 +73,7 @@ class AudioProcessor:
         return frame
 
 # --- UI ---
-st.title("Smart Whistle Logger")
+st.title("Smart Whistle Logger (Debug)")
 status_box = st.empty()
 progress = st.progress(0)
 
@@ -88,11 +97,14 @@ if webrtc_ctx.audio_processor and st.button("Log Event"):
     status_box.info("Blow your whistle now!")
     frames = []
     start = time.time()
+    print("[DEBUG] Started whistle recording")
     # --- Record Whistle ---
     while time.time() - start < WHISTLE_DURATION:
         if processor.frames:
             frames.extend(processor.frames)
             processor.frames.clear()
+        if int(time.time() - start) % 1 == 0:
+            print(f"[DEBUG] Whistle phase: {len(frames)} frames collected")
         progress.progress(int(((time.time() - start) / WHISTLE_DURATION) * 100))
         time.sleep(0.05)
     save_audio(frames, "whistle.wav")
@@ -104,10 +116,13 @@ if webrtc_ctx.audio_processor and st.button("Log Event"):
     processor.frames.clear()
     note_frames = []
     start = time.time()
+    print("[DEBUG] Started note recording")
     while time.time() - start < NOTE_DURATION:
         if processor.frames:
             note_frames.extend(processor.frames)
             processor.frames.clear()
+        if int(time.time() - start) % 1 == 0:
+            print(f"[DEBUG] Note phase: {len(note_frames)} frames collected")
         progress.progress(int(((time.time() - start) / NOTE_DURATION) * 100))
         time.sleep(0.05)
     save_audio(note_frames, "voice_note.wav")
@@ -120,6 +135,7 @@ if webrtc_ctx.audio_processor and st.button("Log Event"):
         "whistle": whistle_type,
         "note": transcription
     })
+    print("[DEBUG] Event logged successfully")
 
 # --- Event Log ---
 st.write("### Event Log")
