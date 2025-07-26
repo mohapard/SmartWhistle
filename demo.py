@@ -2,42 +2,36 @@ import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import av, wave, os, time, numpy as np, matplotlib.pyplot as plt
 
-# --- CONFIG ---
-RATE = 44100
 DURATION = 3
 os.makedirs("data", exist_ok=True)
 RTC_CONFIGURATION = RTCConfiguration({
-    "iceServers": [
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        {
-            "urls": ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"],
-            "username": "openrelayproject",
-            "credential": "openrelayproject"
-        }
-    ]
+    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 })
 
-# --- AUDIO PROCESSOR (same as your code) ---
 class AudioProcessor:
     def __init__(self):
         self.frames = []
+        self.sample_rate = None
+        self.channels = None
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        self.frames.append(frame.to_ndarray().astype(np.int16).tobytes())
+        arr = frame.to_ndarray().astype(np.int16)
+        self.frames.append(arr.tobytes())
+        # Save actual properties from first frame
+        if self.sample_rate is None:
+            self.sample_rate = frame.sample_rate
+            self.channels = frame.layout.channels
         return frame
 
-# --- HELPER: Save WAV ---
-def save_audio(frames, filename, rate=RATE):
+def save_audio(frames, filename, rate, channels):
     with wave.open(filename, 'wb') as wf:
-        wf.setnchannels(1)
+        wf.setnchannels(channels)
         wf.setsampwidth(2)
         wf.setframerate(rate)
         wf.writeframes(b''.join(frames))
     return filename
 
-# --- UI ---
-st.title("Audio Frame Capture Debugger")
+st.title("Audio Capture Debugger (Correct Rate)")
 progress = st.progress(0)
-status = st.empty()
 
 webrtc_ctx = webrtc_streamer(
     key="recorder",
@@ -54,31 +48,24 @@ if webrtc_ctx.audio_processor and st.button("Record Test Clip"):
     processor.frames.clear()
     frames = []
     start = time.time()
-    st.info("Recording... Speak or whistle!")
+    st.info("Recording...")
     while time.time() - start < DURATION:
         if processor.frames:
             frames.extend(processor.frames)
             processor.frames.clear()
-        if int(time.time() - start) % 1 == 0:
-            print(f"[DEBUG] Frames so far: {len(frames)}")
-        progress.progress(int(((time.time() - start) / DURATION) * 100))
         time.sleep(0.05)
 
-    # Save file
-    filename = "data/test_capture.wav"
-    save_audio(frames, filename)
-    st.success(f"Recording saved: {filename}")
+    rate = processor.sample_rate or 48000
+    channels = processor.channels or 1
+    filename = "data/test_correct.wav"
+    save_audio(frames, filename, rate, channels)
+    st.success(f"Recording saved: {filename} ({rate}Hz, {channels}ch)")
     st.audio(filename, format="audio/wav")
 
-    # Show stats
-    file_size = os.path.getsize(filename)
-    st.write(f"**Frames captured:** {len(frames)}")
-    st.write(f"**File size:** {file_size} bytes")
-
-    # Optional waveform visualization
+    # Plot waveform
     import soundfile as sf
     audio_data, sr = sf.read(filename)
     fig, ax = plt.subplots()
     ax.plot(audio_data)
-    ax.set_title("Captured Audio Waveform")
+    ax.set_title(f"Waveform ({sr}Hz)")
     st.pyplot(fig)
