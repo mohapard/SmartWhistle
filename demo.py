@@ -5,7 +5,6 @@ import numpy as np
 import openai, librosa
 from sklearn.linear_model import LogisticRegression
 from datetime import datetime
-import matplotlib.pyplot as plt
 from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIG ---
@@ -85,23 +84,20 @@ def transcribe_audio(filename):
 class AudioProcessor:
     def __init__(self):
         self.frames = []
-        self.last_audio = np.zeros(1024)
         self.count = 0
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
         self.count += 1
-        pcm = frame.to_ndarray().astype(np.int16).flatten()
-        self.last_audio = pcm
-        self.frames.append(pcm.tobytes())
+        self.frames.append(frame.to_ndarray().astype(np.int16).tobytes())
         return frame
 
 # --- UI ---
-st.title("Smart Whistle Logger (Debug Mode)")
+st.title("Smart Whistle Logger")
 
 # Auto-refresh every second
-st_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=500, key="refresh")
 
 status_box = st.empty()
-status_box.info(st.session_state.status)
+progress = st.progress(0)
 
 # WebRTC
 webrtc_ctx = webrtc_streamer(
@@ -114,15 +110,6 @@ webrtc_ctx = webrtc_streamer(
     audio_processor_factory=AudioProcessor,
 )
 
-# DEBUG: Frame count
-if webrtc_ctx.audio_processor:
-    st.write(f"**Audio frames received:** {webrtc_ctx.audio_processor.count}")
-    fig, ax = plt.subplots()
-    ax.plot(webrtc_ctx.audio_processor.last_audio)
-    ax.set_ylim([-32768, 32768])
-    ax.set_title("Live Audio Waveform")
-    st.pyplot(fig)
-
 # --- START RECORDING ---
 if webrtc_ctx.audio_receiver and st.button("Log Event"):
     processor = webrtc_ctx.audio_processor
@@ -130,7 +117,7 @@ if webrtc_ctx.audio_receiver and st.button("Log Event"):
         processor.frames.clear()
         st.session_state.recording_state = "whistle"
         st.session_state.whistle_start = time.time()
-        st.session_state.status = "Recording whistle..."
+        st.session_state.status = "Blow your whistle now!"
         print("[DEBUG] Started whistle recording")
 
 # --- STATE MACHINE ---
@@ -141,18 +128,23 @@ if processor:
     # Whistle phase
     if st.session_state.recording_state == "whistle":
         elapsed = now - st.session_state.whistle_start
+        progress.progress(min(int((elapsed / WHISTLE_DURATION) * 100), 100))
+        status_box.info(f"Blow your whistle... ({elapsed:.1f}/{WHISTLE_DURATION}s)")
         print(f"[DEBUG] Whistle recording... {elapsed:.2f}s")
         if elapsed >= WHISTLE_DURATION:
             st.session_state.whistle_frames = processor.frames.copy()
             processor.frames.clear()
             st.session_state.recording_state = "note"
             st.session_state.note_start = now
-            st.session_state.status = "Recording voice note..."
+            st.session_state.status = "Speak your note now!"
+            progress.progress(0)
             print("[DEBUG] Whistle phase complete. Switched to note recording.")
 
     # Note phase
     elif st.session_state.recording_state == "note":
         elapsed = now - st.session_state.note_start
+        progress.progress(min(int((elapsed / VOICE_MAX) * 100), 100))
+        status_box.info(f"Recording voice note... ({elapsed:.1f}/{VOICE_MAX}s)")
         print(f"[DEBUG] Note recording... {elapsed:.2f}s")
         if elapsed >= VOICE_MAX:
             st.session_state.note_frames = processor.frames.copy()
@@ -194,6 +186,7 @@ if st.session_state.recording_state == "done":
     st.write(f"**Transcript:** {transcription}")
     st.session_state.recording_state = "idle"
     st.session_state.status = "Idle"
+    progress.progress(0)
     print("[DEBUG] Event logged and state reset to idle.")
 
 # --- Event Log ---
