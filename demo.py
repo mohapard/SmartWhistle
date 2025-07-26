@@ -8,12 +8,17 @@ RTC_CONFIGURATION = RTCConfiguration({
     "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 })
 
-# --- Convert float planar → interleaved PCM16 ---
-def float_to_pcm16(arr):
-    if arr.ndim == 2:  # planar (channels, samples)
-        arr = arr.T.flatten()
-    arr = np.clip(arr, -1.0, 1.0)
-    return (arr * 32767).astype(np.int16)
+# --- Convert ndarray to interleaved PCM16 ---
+def to_pcm16(arr, fmt):
+    if arr.ndim == 2:  # (channels, samples)
+        arr = arr.T.flatten()  # Interleave
+    if fmt == "s16":
+        # Already int16 PCM data
+        return arr.astype(np.int16)
+    else:
+        # Float32/float64 → scale to PCM16
+        arr = np.clip(arr, -1.0, 1.0)
+        return (arr * 32767).astype(np.int16)
 
 # --- AUDIO PROCESSOR ---
 class AudioProcessor:
@@ -36,21 +41,18 @@ class AudioProcessor:
         except Exception:
             self.channels = 1
 
-        # Capture raw PCM bytes depending on format
-        if self.last_format == "s16":
-            pcm_bytes = frame.planes[0].to_bytes()  # already PCM16 interleaved
-        else:
-            arr = frame.to_ndarray()
-            self.last_shape = arr.shape
-            pcm_bytes = float_to_pcm16(arr).tobytes()
-        self.frames.append(pcm_bytes)
+        # Extract as ndarray (always works)
+        arr = frame.to_ndarray()
+        self.last_shape = arr.shape
+        pcm16 = to_pcm16(arr, self.last_format)
+        self.frames.append(pcm16.tobytes())
         return frame
 
 # --- Save WAV ---
 def save_wav(frames, filename, rate, channels):
     with wave.open(filename, 'wb') as wf:
         wf.setnchannels(int(channels))
-        wf.setsampwidth(2)  # 16-bit PCM
+        wf.setsampwidth(2)  # 16-bit
         wf.setframerate(int(rate))
         wf.writeframes(b''.join(frames))
     return filename
@@ -59,7 +61,7 @@ def save_wav(frames, filename, rate, channels):
 def resample_to_16k(input_file, output_file):
     data, sr = sf.read(input_file)
     if data.ndim > 1:
-        data = np.mean(data, axis=1)
+        data = np.mean(data, axis=1)  # Stereo → mono
     resampled = librosa.resample(data.astype(np.float32), orig_sr=sr, target_sr=16000)
     sf.write(output_file, resampled, 16000, subtype='PCM_16')
     return output_file
@@ -73,7 +75,7 @@ def plot_waveform(filename, title):
     st.pyplot(fig)
 
 # --- UI ---
-st.title("Golden Audio Recorder (Raw + Whisper-ready)")
+st.title("Golden Audio Recorder (Reliable Capture)")
 progress = st.progress(0)
 
 webrtc_ctx = webrtc_streamer(
