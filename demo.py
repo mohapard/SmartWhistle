@@ -8,6 +8,13 @@ RTC_CONFIGURATION = RTCConfiguration({
     "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 })
 
+# --- Convert planar float32 → interleaved int16 PCM ---
+def planar_to_interleaved_pcm16(arr):
+    if arr.ndim == 2:  # Planar: (channels, samples)
+        arr = arr.T.flatten()  # Convert to interleaved
+    arr = np.clip(arr, -1.0, 1.0)  # Ensure within range
+    return (arr * 32767).astype(np.int16)
+
 # --- AUDIO PROCESSOR ---
 class AudioProcessor:
     def __init__(self):
@@ -16,17 +23,17 @@ class AudioProcessor:
         self.channels = None
         self.last_shape = None
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        # Force interleaved signed 16-bit PCM
-        arr = frame.to_ndarray(format="s16")
+        arr = frame.to_ndarray()  # Planar float32
         self.last_shape = arr.shape
-        self.frames.append(arr.tobytes())
+        pcm16 = planar_to_interleaved_pcm16(arr)
+        self.frames.append(pcm16.tobytes())
         if self.sample_rate is None:
             self.sample_rate = frame.sample_rate
         if self.channels is None:
             try:
                 self.channels = int(frame.layout.channels)
             except Exception:
-                self.channels = arr.shape[1] if len(arr.shape) > 1 else 1
+                self.channels = arr.shape[0] if arr.ndim > 1 else 1
         return frame
 
 # --- RAW SAVE FUNCTION ---
@@ -34,7 +41,6 @@ def save_audio(frames, filename, rate=None, channels=None):
     if not frames:
         print("[DEBUG] No frames to save.")
         return None
-    # Fallbacks
     try:
         rate = int(rate) if rate else 48000
     except Exception:
@@ -68,7 +74,7 @@ def plot_waveform(filename, title):
     st.pyplot(fig)
 
 # --- UI ---
-st.title("Audio Capture Tester (Robust)")
+st.title("Audio Capture Tester (Planar → Interleaved Fix)")
 progress = st.progress(0)
 
 webrtc_ctx = webrtc_streamer(
