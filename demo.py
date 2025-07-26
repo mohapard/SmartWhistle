@@ -9,13 +9,13 @@ from sklearn.linear_model import LogisticRegression
 from datetime import datetime
 
 # --- CONFIG ---
-openai.api_key = st.secrets["openai_key"]  # Use Streamlit Secrets
+openai.api_key = st.secrets["openai_key"]
 MODEL_FILE = "whistle_mel_model.pkl"
 DATASET_DIR = "whistle_dataset"
-WHISTLE_DURATION = 3  # fixed whistle length
-VOICE_MAX = 10  # max voice note length
-SILENCE_STOP = 3  # seconds of silence to auto-stop
-SILENCE_THRESHOLD = 500  # amplitude threshold
+WHISTLE_DURATION = 3
+VOICE_MAX = 10
+SILENCE_STOP = 3
+SILENCE_THRESHOLD = 500
 os.makedirs(DATASET_DIR, exist_ok=True)
 
 # --- SESSION STATE ---
@@ -74,10 +74,32 @@ class AudioProcessor:
         self.frames.append(pcm)
         return frame
 
+# --- SILENCE DETECTION ---
+def capture_until_silence(frames, start_idx=0, min_len=1, max_len=VOICE_MAX, silence_stop=SILENCE_STOP, silence_thresh=SILENCE_THRESHOLD, rate=44100):
+    captured = []
+    silent_chunks, start_time = 0, time.time()
+    chunk_size = 1024
+    max_chunks = int(rate / chunk_size * max_len)
+    while True:
+        if len(frames) > start_idx:
+            frame = frames[start_idx]
+            captured.append(frame)
+            start_idx += 1
+            audio_data = np.frombuffer(frame, dtype=np.int16)
+            if np.max(np.abs(audio_data)) < silence_thresh:
+                silent_chunks += 1
+            else:
+                silent_chunks = 0
+        if len(captured) >= max_chunks: break
+        if silent_chunks > int(rate / chunk_size * silence_stop) and (time.time() - start_time) > min_len:
+            break
+        time.sleep(0.05)
+    return captured
+
 # --- UI ---
 st.title("Smart Whistle Logger")
 
-st.write("Click below to capture a whistle event (detect whistle → record note → transcribe → log):")
+st.write("Click below to log a whistle event (detect whistle → record note → transcribe → log):")
 webrtc_ctx = webrtc_streamer(
     key="recorder",
     mode=WebRtcMode.SENDRECV,
@@ -87,43 +109,32 @@ webrtc_ctx = webrtc_streamer(
     audio_processor_factory=AudioProcessor,
 )
 
-def wait_for_audio(frames, min_len=1, max_len=VOICE_MAX, silence_stop=SILENCE_STOP, silence_thresh=SILENCE_THRESHOLD, rate=44100):
-    silent_chunks, start = 0, time.time()
-    max_chunks = int(rate / 1024 * max_len)
-    while True:
-        if len(frames) >= max_chunks: break
-        if len(frames) > 0:
-            audio_data = np.frombuffer(frames[-1], dtype=np.int16)
-            if np.max(np.abs(audio_data)) < silence_thresh:
-                silent_chunks += 1
-            else:
-                silent_chunks = 0
-        elapsed = time.time() - start
-        if silent_chunks > int(rate / 1024 * silence_stop) and elapsed > min_len: break
-
-# --- Main Capture Button ---
 if webrtc_ctx.audio_receiver and st.button("Log Event"):
     processor = webrtc_ctx.audio_processor
     if processor:
-        # --- Step 1: Whistle (3s) ---
+        # Reset buffer
+        processor.frames.clear()
+
+        # --- Step 1: Whistle ---
         st.info("Recording whistle...")
-        time.sleep(WHISTLE_DURATION)
-        whistle_file = "whistle.wav"
-        save_audio(processor.frames.copy(), whistle_file)
-        whistle_type = predict_whistle(whistle_file)
+        start = time.time()
+        while time.time() - start < WHISTLE_DURATION:
+            time.sleep(0.05)
+        whistle_frames = processor.frames.copy()
+        save_audio(whistle_frames, "whistle.wav")
+        whistle_type = predict_whistle("whistle.wav")
         st.success(f"Whistle detected: {whistle_type}")
 
-        # --- Step 2: Voice Note (auto-stop) ---
-        st.info("Recording voice note... Speak now.")
-        start_len = len(processor.frames)
-        wait_for_audio(processor.frames[start_len:])
-        voice_file = "voice_note.wav"
-        save_audio(processor.frames[start_len:], voice_file)
+        # --- Step 2: Voice Note ---
+        st.info("Recording voice note...")
+        processor.frames.clear()
+        voice_frames = capture_until_silence(processor.frames)
+        save_audio(voice_frames, "voice_note.wav")
         st.success("Voice note captured.")
 
         # --- Step 3: Transcribe ---
-        st.info("Transcribing voice note...")
-        transcription = transcribe_audio(voice_file)
+        st.info("Transcribing...")
+        transcription = transcribe_audio("voice_note.wav")
         st.write(f"**Transcript:** {transcription}")
 
         # --- Step 4: Log Event ---
