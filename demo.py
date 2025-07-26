@@ -28,8 +28,9 @@ def save_audio(frames, filename, rate=None, channels=None):
     if not frames:
         print("[DEBUG] No frames to save.")
         return None
-    rate = rate or 48000
-    channels = channels or 1
+    # Force safe defaults if None or 0
+    rate = rate if rate and rate > 0 else 48000
+    channels = channels if channels and channels > 0 else 1
     with wave.open(filename, 'wb') as wf:
         wf.setnchannels(channels)
         wf.setsampwidth(2)
@@ -65,9 +66,11 @@ if webrtc_ctx.audio_processor and st.button("Record Test Clip"):
         time.sleep(0.05)
 
     # Save file using detected rate/channels
-    rate = processor.sample_rate or 48000
-    channels = processor.channels or 1
+    #rate = processor.sample_rate or 48000
+    #channels = processor.channels or 1
     filename = "data/test_fixed.wav"
+    rate = processor.sample_rate
+    channels = processor.channels
     save_audio(frames, filename, rate, channels)
     st.success(f"Recording saved: {filename} ({rate}Hz, {channels}ch)")
     st.audio(filename, format="audio/wav")
