@@ -49,4 +49,33 @@ navigator.mediaDevices.enumerateDevices().then(devices => {
 """, height=300)
 
 # Mic selection
-device_id = st.text_input("Enter deviceId (see above). Leave emp
+device_id = st.text_input("Enter deviceId (see above). Leave empty for default:")
+media_constraints = {"audio": True, "video": True}
+if device_id.strip():
+    media_constraints = {"audio": {"deviceId": {"exact": device_id}}, "video": True}
+
+# WebRTC
+webrtc_ctx = webrtc_streamer(
+    key="mic-debug",
+    mode=WebRtcMode.SENDRECV,
+    rtc_configuration=RTC_CONFIGURATION,
+    audio_receiver_size=256,
+    media_stream_constraints=media_constraints,
+    async_processing=True,
+    audio_processor_factory=AudioProcessor,
+)
+
+# Status
+if webrtc_ctx.state.playing:
+    st.success("Connected & streaming.")
+else:
+    st.warning("Waiting for connection...")
+
+# Audio frames
+if webrtc_ctx.audio_processor:
+    st.write(f"**Audio frames received:** {webrtc_ctx.audio_processor.count}")
+    fig, ax = plt.subplots()
+    ax.plot(webrtc_ctx.audio_processor.last_audio)
+    ax.set_ylim([-32768, 32768])
+    ax.set_title("Live Audio Waveform")
+    st.pyplot(fig)
