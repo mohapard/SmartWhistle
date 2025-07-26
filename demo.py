@@ -12,10 +12,10 @@ RTC_CONFIGURATION = RTCConfiguration({
 def planar_to_interleaved_pcm16(arr):
     if arr.ndim == 2:  # Planar: (channels, samples)
         arr = arr.T.flatten()  # Convert to interleaved
-    arr = np.clip(arr, -1.0, 1.0)  # Keep within range
+    arr = np.clip(arr, -1.0, 1.0)  # Keep within valid range
     return (arr * 32767).astype(np.int16)
 
-# --- AUDIO PROCESSOR (with full diagnostics) ---
+# --- AUDIO PROCESSOR (with diagnostics) ---
 class AudioProcessor:
     def __init__(self):
         self.frames = []
@@ -32,9 +32,12 @@ class AudioProcessor:
         self.last_layout = frame.layout.name
         self.last_samples = frame.samples
         self.sample_rate = frame.sample_rate
-        self.channels = frame.layout.channels
+        try:
+            self.channels = frame.layout.nb_channels
+        except Exception:
+            self.channels = 1  # Fallback to mono if unavailable
 
-        # Log to console (for debugging)
+        # Log to server console
         print(f"[DEBUG] Frame: format={self.last_format}, layout={self.last_layout}, "
               f"rate={self.sample_rate}, channels={self.channels}, samples={self.last_samples}")
 
@@ -50,11 +53,17 @@ def save_audio(frames, filename, rate=None, channels=None):
     if not frames:
         print("[DEBUG] No frames to save.")
         return None
-    rate = int(rate) if rate else 48000
-    channels = int(channels) if channels else 1
+    try:
+        rate = int(rate) if rate else 48000
+    except Exception:
+        rate = 48000
+    try:
+        channels = int(channels) if isinstance(channels, (int, float)) else 1
+    except Exception:
+        channels = 1
     with wave.open(filename, 'wb') as wf:
         wf.setnchannels(channels)
-        wf.setsampwidth(2)  # 16-bit
+        wf.setsampwidth(2)  # 16-bit PCM
         wf.setframerate(rate)
         wf.writeframes(b''.join(frames))
     return filename, rate, channels
