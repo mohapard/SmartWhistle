@@ -74,14 +74,14 @@ def retrain_model():
                 feat = extract_mel(os.path.join(folder_path, f))
                 X.append(feat)
                 y.append(label)
-    if not X:
-        return False
+    if not X or len(set(y)) < 2:
+        return False, "Need samples for both Single and Double whistles."
     X, y = shuffle(X, y, random_state=42)
     model = LogisticRegression(max_iter=1000)
     model.fit(X, y)
     with open(MODEL_FILE, "wb") as f:
         pickle.dump(model, f)
-    return True
+    return True, "Model retrained successfully!"
 
 # --- Whisper Transcription ---
 def transcribe_audio(filename):
@@ -111,6 +111,12 @@ class AudioProcessor:
         self.frames.append(pcm16.tobytes())
         return frame
 
+# --- Helper: Sample counts ---
+def get_sample_counts():
+    single_count = len([f for f in os.listdir("data/retrain/single") if f.endswith(".wav")])
+    double_count = len([f for f in os.listdir("data/retrain/double") if f.endswith(".wav")])
+    return single_count, double_count
+
 # --- UI ---
 st.title("Smart Whistle Logger with Retraining")
 status_box = st.empty()
@@ -132,6 +138,8 @@ if "events" not in st.session_state:
 
 # --- Retraining Mode ---
 if mode == "Retraining" and webrtc_ctx.audio_processor:
+    single_count, double_count = get_sample_counts()
+    st.markdown(f"**Current Samples:** Single: `{single_count}` | Double: `{double_count}`")
     label = st.selectbox("Whistle Type", ["Single", "Double"])
     if st.button("Record Sample"):
         processor = webrtc_ctx.audio_processor
@@ -151,11 +159,11 @@ if mode == "Retraining" and webrtc_ctx.audio_processor:
 
     if st.button("Retrain Model"):
         status_box.info("Retraining model...")
-        success = retrain_model()
+        success, msg = retrain_model()
         if success:
-            status_box.success("Model retrained successfully!")
+            status_box.success(msg)
         else:
-            status_box.error("No samples found for retraining.")
+            status_box.error(msg)
 
 # --- Logging Mode ---
 if mode == "Logging" and webrtc_ctx.audio_processor and st.button("Log Event"):
