@@ -1,51 +1,39 @@
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-import av, wave, os, time, numpy as np, soundfile as sf, librosa, matplotlib.pyplot as plt
+import av, wave, os, time, pickle, numpy as np, soundfile as sf, librosa
+from datetime import datetime
+import matplotlib.pyplot as plt
+import openai
+from sklearn.linear_model import LogisticRegression
 
-DURATION = 3
+# --- CONFIG ---
+openai.api_key = st.secrets["openai_key"]
+MODEL_FILE = "whistle_mel_model.pkl"
+WHISTLE_DURATION = 3
+NOTE_DURATION = 6
 os.makedirs("data", exist_ok=True)
 RTC_CONFIGURATION = RTCConfiguration({
     "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 })
 
-# --- AUDIO PROCESSOR ---
-class AudioProcessor:
-    def __init__(self):
-        self.frames = []
-        self.sample_rate = None
-        self.channels = None
-    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        arr = frame.to_ndarray().astype(np.int16)
-        self.frames.append(arr.tobytes())
-        if self.sample_rate is None:
-            self.sample_rate = frame.sample_rate
-        if self.channels is None:
-            self.channels = frame.layout.channels
-        return frame
+# --- Audio Conversion Helpers ---
+def to_pcm16(arr, fmt):
+    if arr.ndim == 2:  # (channels, samples)
+        arr = arr.T.flatten()  # Interleave
+    if fmt == "s16":
+        return arr.astype(np.int16)
+    else:
+        arr = np.clip(arr, -1.0, 1.0)
+        return (arr * 32767).astype(np.int16)
 
-# --- RAW SAVE FUNCTION ---
-def save_audio(frames, filename, rate=None, channels=None):
-    if not frames:
-        print("[DEBUG] No frames to save.")
-        return None
-    # Force clean int values
-    try:
-        rate = int(rate) if rate else 48000
-    except Exception:
-        rate = 48000
-    try:
-        channels = int(channels) if channels else 1
-    except Exception:
-        channels = 1
-
+def save_wav(frames, filename, rate, channels):
     with wave.open(filename, 'wb') as wf:
-        wf.setnchannels(channels)
-        wf.setsampwidth(2)
-        wf.setframerate(rate)
+        wf.setnchannels(int(channels))
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(int(rate))
         wf.writeframes(b''.join(frames))
-    return filename, rate, channels
+    return filename
 
-# --- RESAMPLING TO 16k MONO ---
 def resample_to_16k(input_file, output_file):
     data, sr = sf.read(input_file)
     if data.ndim > 1:
@@ -54,20 +42,63 @@ def resample_to_16k(input_file, output_file):
     sf.write(output_file, resampled, 16000, subtype='PCM_16')
     return output_file
 
-# --- WAVEFORM PLOT ---
-def plot_waveform(filename, title):
-    data, sr = sf.read(filename)
-    fig, ax = plt.subplots()
-    ax.plot(data)
-    ax.set_title(f"{title} ({sr}Hz)")
-    st.pyplot(fig)
+# --- Feature Extraction for Whistle ---
+def extract_mel(filename):
+    y, sr = librosa.load(filename, sr=22050)
+    y = librosa.util.fix_length(y, size=sr * WHISTLE_DURATION)
+    mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=40)
+    return librosa.power_to_db(mel, ref=np.max).flatten()
+
+# --- Load whistle model ---
+def load_model():
+    if os.path.exists(MODEL_FILE):
+        with open(MODEL_FILE, "rb") as f:
+            return pickle.load(f)
+    return None
+
+def predict_whistle(filename):
+    model = load_model()
+    if not model:
+        return "Unknown Whistle"
+    features = extract_mel(filename).reshape(1, -1)
+    pred = model.predict(features)[0]
+    return "Single" if pred == 0 else "Double"
+
+# --- Whisper Transcription ---
+def transcribe_audio(filename):
+    with open(filename, "rb") as f:
+        transcript = openai.audio.transcriptions.create(
+            model="gpt-4o-transcribe",
+            file=f
+        )
+    return transcript.text
+
+# --- AUDIO PROCESSOR ---
+class AudioProcessor:
+    def __init__(self):
+        self.frames = []
+        self.sample_rate = None
+        self.channels = None
+        self.format = None
+    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
+        self.format = frame.format.name
+        self.sample_rate = frame.sample_rate
+        try:
+            self.channels = frame.layout.nb_channels
+        except Exception:
+            self.channels = 1
+        arr = frame.to_ndarray()
+        pcm16 = to_pcm16(arr, self.format)
+        self.frames.append(pcm16.tobytes())
+        return frame
 
 # --- UI ---
-st.title("Audio Capture Tester (Raw vs Resampled)")
+st.title("Smart Whistle Logger")
+status_box = st.empty()
 progress = st.progress(0)
 
 webrtc_ctx = webrtc_streamer(
-    key="recorder",
+    key="whistle_logger",
     mode=WebRtcMode.SENDONLY,
     rtc_configuration=RTC_CONFIGURATION,
     media_stream_constraints={"audio": True, "video": False},
@@ -76,34 +107,61 @@ webrtc_ctx = webrtc_streamer(
     sendback_audio=False
 )
 
-if webrtc_ctx.audio_processor and st.button("Record Test Clip"):
+if "events" not in st.session_state:
+    st.session_state.events = []
+
+# --- MAIN FLOW ---
+if webrtc_ctx.audio_processor and st.button("Log Event"):
     processor = webrtc_ctx.audio_processor
     processor.frames.clear()
     frames = []
+
+    # --- Step 1: Record Whistle ---
+    status_box.info("Blow your whistle now!")
     start = time.time()
-    st.info("Recording 3 seconds...")
-    while time.time() - start < DURATION:
+    while time.time() - start < WHISTLE_DURATION:
         if processor.frames:
             frames.extend(processor.frames)
             processor.frames.clear()
-        progress.progress(int(((time.time() - start) / DURATION) * 100))
+        progress.progress(int(((time.time() - start) / WHISTLE_DURATION) * 100))
         time.sleep(0.05)
+    whistle_file = "data/whistle.wav"
+    save_wav(frames, whistle_file, processor.sample_rate or 48000, processor.channels or 2)
+    whistle_type = predict_whistle(whistle_file)
+    status_box.success(f"Whistle detected: {whistle_type}")
 
-    # --- Save raw ---
-    raw_file = "data/test_raw.wav"
-    raw_file, rate, channels = save_audio(frames, raw_file, processor.sample_rate, processor.channels)
-    st.success(f"Raw saved: {raw_file} ({rate}Hz, {channels}ch)")
-    st.audio(raw_file, format="audio/wav")
-    plot_waveform(raw_file, "Raw WebRTC Audio")
+    # --- Step 2: Record Voice Note ---
+    status_box.info("Speak your note now!")
+    frames = []
+    processor.frames.clear()
+    start = time.time()
+    while time.time() - start < NOTE_DURATION:
+        if processor.frames:
+            frames.extend(processor.frames)
+            processor.frames.clear()
+        progress.progress(int(((time.time() - start) / NOTE_DURATION) * 100))
+        time.sleep(0.05)
+    note_file = "data/voice_note_raw.wav"
+    save_wav(frames, note_file, processor.sample_rate or 48000, processor.channels or 2)
+    whisper_file = "data/voice_note_16k.wav"
+    resample_to_16k(note_file, whisper_file)
 
-    # --- Save resampled 16k mono ---
-    clean_file = "data/test_resampled.wav"
-    resample_to_16k(raw_file, clean_file)
-    st.success(f"Resampled saved: {clean_file} (16kHz mono)")
-    st.audio(clean_file, format="audio/wav")
-    plot_waveform(clean_file, "Resampled Audio (16kHz Mono)")
+    # --- Step 3: Transcription ---
+    status_box.info("Transcribing voice note...")
+    transcription = transcribe_audio(whisper_file)
+    status_box.success("Transcription complete!")
 
-    # Debug info
-    st.write(f"**Frames captured:** {len(frames)}")
-    st.write(f"**Raw file size:** {os.path.getsize(raw_file)} bytes")
-    st.write(f"**Resampled file size:** {os.path.getsize(clean_file)} bytes")
+    # --- Save event ---
+    st.session_state.events.append({
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "whistle": whistle_type,
+        "note": transcription
+    })
+
+    st.success(f"Event logged! Whistle: {whistle_type}")
+    st.write(f"**Transcript:** {transcription}")
+
+# --- Event Log ---
+st.write("### Event Log")
+for e in st.session_state.events:
+    st.write(f"- **{e['time']}**: Whistle: {e['whistle']} — Note: {e['note']}")
